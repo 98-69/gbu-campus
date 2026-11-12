@@ -17,6 +17,7 @@ let renderer,world,ready=false,mode='welcome',paused=false,shotPaused=false;
 let reduced=matchMedia('(prefers-reduced-motion: reduce)').matches, sensitivity=1,quality='balanced';
 let tourTime=0,tourDone=false,elapsed=0,lastTime=performance.now(),activePlace='plaza',transitionId=0;
 let yaw=0,pitch=0,targetYaw=0,targetPitch=0,drag=null,toastTimer;
+let flying=false,landing=false,verticalVelocity=0;
 const keys=new Set(),touchMove=new Set(),velocity=new THREE.Vector2();
 const scene=new THREE.Scene();
 scene.background=new THREE.Color('#cbdce2');scene.fog=new THREE.Fog('#cbdce2',180,490);
@@ -29,10 +30,16 @@ sun.shadow.bias=-.00015;sun.shadow.normalBias=.045;sun.shadow.camera.updateProje
 scene.add(sun,new THREE.HemisphereLight(0xe5f0ff,0x8c8c69,1.4));
 
 function lookAt(target){camera.lookAt(...target);yaw=targetYaw=camera.rotation.y;pitch=targetPitch=camera.rotation.x;}
-function setView(position,target){camera.position.set(...position);lookAt(target);velocity.set(0,0);}
+function resetFlight(){flying=false;landing=false;verticalVelocity=0;keys.delete('r');keys.delete('c');}
+function setView(position,target){resetFlight();camera.position.set(...position);lookAt(target);velocity.set(0,0);}
 function overview(){setView(small()?[100,170,330]:[104,85,175],[0,4,-2]);}
 overview();
-function clearInput(){keys.clear();touchMove.clear();velocity.set(0,0);drag=null;}
+function clearInput(){keys.clear();touchMove.clear();velocity.set(0,0);verticalVelocity=0;drag=null;}
+function toggleFlight(){
+  if(flying){flying=false;landing=true;verticalVelocity=0;announce('Landing safely on the ground.');}
+  else if(!landing){flying=true;verticalVelocity=0;announce('Day flight enabled. Use R to rise and C to descend. Press F to land.');}
+}
+function finishLanding(){landing=false;verticalVelocity=0;camera.position.y=1.72;$('visit-status').hidden=true;}
 function announce(message,persist=false){clearTimeout(toastTimer);$('visit-status').textContent=message;$('visit-status').hidden=false;if(!persist)toastTimer=setTimeout(()=>$('visit-status').hidden=true,4300);}
 function locationUI(place){if(activePlace===place)return;activePlace=place;const p=places[place];$('place-title').textContent=p.title;$('place-description').textContent=p.description;document.querySelectorAll('[data-place]').forEach(b=>b.toggleAttribute('aria-current',b.dataset.place===place));}
 function syncUI(){
@@ -50,7 +57,7 @@ async function transitionTo(position,target){
   setView(position,target);$('scene-fade').classList.remove('active');return true;
 }
 async function visit(place,{instant=false}={}){
-  if(!ready)return;mode='walk';paused=false;tourDone=false;clearInput();locationUI(place);syncUI();
+  if(!ready)return;resetFlight();mode='walk';paused=false;tourDone=false;clearInput();locationUI(place);syncUI();
   const view=places[place];
   if(instant){transitionId++;$('scene-fade').classList.remove('active');setView(view.position,view.target);}
   else await transitionTo(view.position,view.target);
@@ -58,7 +65,7 @@ async function visit(place,{instant=false}={}){
 }
 async function beginTour(){
   if(!ready)return;if(reduced){await visit(mode==='welcome'?'plaza':placeOrder[(placeOrder.indexOf(activePlace)+1)%placeOrder.length]);announce('Camera motion is reduced. Choose a place to continue.');return;}
-  mode='walk';paused=false;tourTime=0;tourDone=false;locationUI('plaza');syncUI();
+  resetFlight();mode='walk';paused=false;tourTime=0;tourDone=false;locationUI('plaza');syncUI();
   if(!await transitionTo(places.plaza.position,places.plaza.target))return;mode='tour';syncUI();canvas.focus({preventScroll:true});announce('A walk through the model-based campus. Move or drag to take over.');
 }
 function takeOver(){if(mode==='tour'){mode='walk';paused=false;syncUI();announce('You’re in control. Explore at your own pace.');}if(paused){paused=false;syncUI();$('visit-status').hidden=true;}}
@@ -76,7 +83,7 @@ const audio={context:null,master:null,wind:null,on:false,distance:0,sources:new 
   pause(value){if(this.pauseState===value)return;this.pauseState=value;if(this.context)this.master.gain.setTargetAtTime(this.on&&!value?.055:0,this.context.currentTime,.2);},
   dispose(){this.generation++;this.on=false;this.pauseState=null;this.distance=0;const ctx=this.context;if(this.master&&ctx){this.master.gain.cancelScheduledValues(ctx.currentTime);this.master.gain.setValueAtTime(0,ctx.currentTime);}for(const node of [this.wind,...this.sources]){try{node?.stop();node?.disconnect();}catch{}}this.sources.clear();this.master?.disconnect();this.wind=null;this.master=null;this.context=null;if(ctx&&ctx.state!=='closed')void ctx.close().catch(()=>{});$('sound').setAttribute('aria-pressed','false');$('sound').setAttribute('aria-label','Turn ambience on');}
 };
-addEventListener('pagehide',()=>{clearInput();paused=true;audio.dispose();});
+addEventListener('pagehide',()=>{clearInput();resetFlight();if(mode!=='welcome')camera.position.y=1.72;paused=true;audio.dispose();});
 addEventListener('beforeunload',()=>{clearInput();paused=true;audio.dispose();if(ready)syncUI();});
 addEventListener('pageshow',event=>{if(event.persisted){lastTime=performance.now();syncUI();}});
 if(import.meta.hot)import.meta.hot.dispose(()=>audio.dispose());
@@ -103,7 +110,8 @@ addEventListener('keydown',e=>{
   if(dialogs.some(d=>d.open))return;if(e.target instanceof HTMLInputElement||e.target instanceof HTMLSelectElement)return;
   const k=e.key.toLowerCase();if(k==='escape'){e.preventDefault();togglePause();return;}if(k==='h'){openDialog('help-dialog');return;}
   if(!ready||mode==='welcome')return;
-  if(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright','q','e','shift'].includes(k)){e.preventDefault();takeOver();keys.add(k);}
+  if(k==='f'){e.preventDefault();if(!e.repeat&&!paused&&mode==='walk'){toggleFlight();}return;}
+  if(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright','q','e','shift','r','c'].includes(k)){e.preventDefault();if((k==='r'||k==='c')&&!flying)return;takeOver();keys.add(k);}
 });
 addEventListener('keyup',e=>keys.delete(e.key.toLowerCase()));
 addEventListener('blur',clearInput);
@@ -127,7 +135,9 @@ function walk(dt){
   const vx=(-Math.sin(yaw)*forward+Math.cos(yaw)*side)/length*speed,vz=(-Math.cos(yaw)*forward-Math.sin(yaw)*side)/length*speed;
   velocity.x=THREE.MathUtils.damp(velocity.x,vx,12,dt);velocity.y=THREE.MathUtils.damp(velocity.y,vz,12,dt);
   const steps=Math.max(1,Math.ceil(dt/.016));for(let i=0;i<steps;i++){const x=camera.position.x+velocity.x*dt/steps,z=camera.position.z+velocity.y*dt/steps;if(canMove(x,camera.position.z))camera.position.x=x;else velocity.x=0;if(canMove(camera.position.x,z))camera.position.z=z;else velocity.y=0;}
-  camera.position.y=1.72;
+  if(landing){camera.position.y=Math.max(1.72,camera.position.y-4*dt);if(camera.position.y<=1.72)finishLanding();}
+  else if(flying){verticalVelocity=(Number(keys.has('r'))-Number(keys.has('c')))*4;camera.position.y=THREE.MathUtils.clamp(camera.position.y+verticalVelocity*dt,1.72,100);}
+  else camera.position.y=1.72;
   yaw=THREE.MathUtils.damp(yaw,targetYaw,22,dt);pitch=THREE.MathUtils.damp(pitch,targetPitch,22,dt);camera.rotation.set(pitch,yaw,0,'YXZ');
 }
 // Authored stop-to-stop route follows the same promenade and open entrances as walking.
@@ -148,7 +158,7 @@ let frameCount=0,frameMs=[];
 function render(now){
   const rawMs=now-lastTime,dt=Math.min(rawMs/1000,.05);lastTime=now;if(!renderer)return;
   if(!ready){renderer.clear();requestAnimationFrame(render);return;}
-  if(ready&&!shotPaused){elapsed+=dt;previousPos.copy(camera.position);if(!paused&&mode!=='welcome'){if(mode==='tour')guided(dt);else walk(dt);audio.step(camera.position.distanceTo(previousPos));updatePlace();}world.update(paused?0:dt,elapsed,camera.position);audio.pause(paused);}
+  if(ready&&!shotPaused){elapsed+=dt;previousPos.copy(camera.position);if(!paused&&mode!=='welcome'){if(mode==='tour')guided(dt);else walk(dt);if(!flying&&!landing)audio.step(camera.position.distanceTo(previousPos));updatePlace();}world.update(paused?0:dt,elapsed,camera.position);audio.pause(paused);}
   renderer.info.reset();renderer.render(scene,camera);if(frameCount++%2===0){frameMs.push(rawMs);if(frameMs.length>240)frameMs.shift();}requestAnimationFrame(render);
 }
 async function init(){
@@ -162,7 +172,7 @@ async function init(){
   }catch(error){console.error('Campus visit could not initialize',error);$('loading').hidden=true;$('load-error').hidden=false;$('start-tour').hidden=true;$('start-walk').hidden=true;}
 }
 function installDiagnostics(){
-  window.__THREE_GAME_DIAGNOSTICS__={renderer:renderer.info,get state(){return{ready,mode,paused,activePlace,audio:{on:audio.on,contextState:audio.context?.state??"closed",sources:audio.sources.size+(audio.wind?1:0),gain:audio.master?.gain.value??0},position:camera.position.toArray(),tourTime,quality,world:world.diagnostics||null,frameTimeMs:frameMs.length?frameMs.reduce((a,b)=>a+b,0)/frameMs.length:null,physics:{engine:'custom bounded walk',timestep:'substeps <= 16ms',ccdBodies:0}};}};
+  window.__THREE_GAME_DIAGNOSTICS__={renderer:renderer.info,get state(){return{ready,mode,paused,activePlace,flying,landing,audio:{on:audio.on,contextState:audio.context?.state??"closed",sources:audio.sources.size+(audio.wind?1:0),gain:audio.master?.gain.value??0},position:camera.position.toArray(),tourTime,quality,world:world.diagnostics||null,frameTimeMs:frameMs.length?frameMs.reduce((a,b)=>a+b,0)/frameMs.length:null,physics:{engine:'custom bounded walk',timestep:'substeps <= 16ms',ccdBodies:0}};}};
   window.__THREE_GAME_TEST_HOOKS__={
     async setState(name){if(!['welcome',...placeOrder,'settings'].includes(name))throw new Error(`Unknown state: ${name}`);dialogs.forEach(d=>d.close());clearInput();shotPaused=false;paused=false;elapsed=0;if(name==='welcome'){mode='welcome';overview();syncUI();}else{await visit(name==='settings'?'plaza':name,{instant:true});if(name==='settings')openDialog('settings-dialog');}$('visit-status').hidden=true;world.update(.1,0,camera.position);renderer.info.reset();renderer.render(scene,camera);return{state:name};},
     setPausedForScreenshot(value){shotPaused=Boolean(value);clearInput();},setReducedMotion(value){reduced=Boolean(value);$('reduced-motion').checked=reduced;syncUI();}
